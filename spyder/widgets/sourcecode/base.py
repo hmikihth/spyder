@@ -104,7 +104,7 @@ class CompletionWidget(QListWidget):
         screen_bottom = srect.bottom()
         
         point = self.textedit.cursorRect().bottomRight()
-        point.setX(point.x()+self.textedit.get_linenumberarea_width())
+        point = self.textedit.calculate_real_position(point)
         point = self.textedit.mapToGlobal(point)
 
         # Computing completion widget and its parent right positions
@@ -182,7 +182,7 @@ class CompletionWidget(QListWidget):
         if completion_text:
             for row, completion in enumerate(self.completion_list):
                 if not self.case_sensitive:
-                    print(completion_text)
+                    print(completion_text)  # spyder: test-skip
                     completion = completion.lower()
                     completion_text = completion_text.lower()
                 if completion.startswith(completion_text):
@@ -272,6 +272,8 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
         self.matched_p_color = QColor(Qt.green)
         self.unmatched_p_color = QColor(Qt.red)
 
+        self.last_cursor_cell = None
+
     def setup_completion(self):
         size = CONF.get('main', 'completion/size')
         font = get_font()
@@ -282,8 +284,11 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
 
     def set_tab_stop_width_spaces(self, tab_stop_width_spaces):
         self.tab_stop_width_spaces = tab_stop_width_spaces
-        self.setTabStopWidth(tab_stop_width_spaces
-                             * self.fontMetrics().width('9'))
+        self.update_tab_stop_width_spaces()
+
+    def update_tab_stop_width_spaces(self):
+        self.setTabStopWidth(self.fontMetrics().width(
+                '9' * self.tab_stop_width_spaces))
 
     def set_palette(self, background, foreground):
         """
@@ -327,13 +332,17 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
 
     def update_extra_selections(self):
         extra_selections = []
+
+        # Python 3 compatibility (weird): current line has to be
+        # highlighted first
+        if 'current_cell' in self.extra_selections_dict:
+            extra_selections.extend(self.extra_selections_dict['current_cell'])
+        if 'current_line' in self.extra_selections_dict:
+            extra_selections.extend(self.extra_selections_dict['current_line'])
+
         for key, extra in list(self.extra_selections_dict.items()):
-            if key == 'current_line' or key == 'current_cell':
-                # Python 3 compatibility (weird): current line has to be
-                # highlighted first
-                extra_selections = extra + extra_selections
-            else:
-                extra_selections += extra
+            if not (key == 'current_line' or key == 'current_cell'):
+                extra_selections.extend(extra)
         self.setExtraSelections(extra_selections)
 
     def clear_extra_selections(self, key):
@@ -621,16 +630,29 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
         
         return ls.join(lines)
 
-    def get_cell_as_executable_code(self):
-        """Return cell contents as executable code"""
+    def __exec_cell(self):
+        init_cursor = QTextCursor(self.textCursor())
         start_pos, end_pos = self.__save_selection()
         cursor, whole_file_selected = self.select_current_cell()
         if not whole_file_selected:
             self.setTextCursor(cursor)
         text = self.get_selection_as_executable_code()
+        self.last_cursor_cell = init_cursor
         self.__restore_selection(start_pos, end_pos)
         if text is not None:
             text = text.rstrip()
+        return text
+
+    def get_cell_as_executable_code(self):
+        """Return cell contents as executable code"""
+        return self.__exec_cell()
+
+    def get_last_cell_as_executable_code(self):
+        text = None
+        if self.last_cursor_cell:
+            self.setTextCursor(self.last_cursor_cell)
+            self.highlight_current_cell()
+            text = self.__exec_cell()
         return text
 
     def is_cell_separator(self, cursor=None, block=None):
@@ -691,7 +713,7 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
             prev_pos = cur_pos
         cell_at_file_end = cursor.atEnd()
         return cursor, cell_at_file_start and cell_at_file_end
-    
+
     def select_current_cell_in_visible_portion(self):
         """Select cell under cursor in the visible portion of the file
         cell = group of lines separated by CELL_SEPARATORS
@@ -769,6 +791,26 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
                 return
         self.setTextCursor(cursor)
 
+    def go_to_previous_cell(self):
+        """Go to the previous cell of lines"""
+        cursor = self.textCursor()
+        cur_pos = prev_pos = cursor.position()
+
+        if self.is_cell_separator(cursor):
+            # Move to the previous cell
+            cursor.movePosition(QTextCursor.PreviousBlock)
+            cur_pos = prev_pos = cursor.position()
+
+        while not self.is_cell_separator(cursor):
+            # Move to the previous cell or the beginning of the current cell
+            cursor.movePosition(QTextCursor.PreviousBlock)
+            prev_pos = cur_pos
+            cur_pos = cursor.position()
+            if cur_pos == prev_pos:
+                return
+
+        self.setTextCursor(cursor)
+
     def get_line_count(self):
         """Return document total line number"""
         return self.blockCount()
@@ -844,61 +886,70 @@ class TextEditBaseWidget(QPlainTextEdit, BaseEditMixin):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         start_pos, end_pos = self.__save_selection()
-        add_linesep = False
-        if to_text_string(cursor.selectedText()):
-            # Check if start_pos is at the start of a block
-            cursor.setPosition(start_pos)
-            cursor.movePosition(QTextCursor.StartOfBlock)
-            start_pos = cursor.position()
-
-            cursor.setPosition(end_pos)
-            # Check if end_pos is at the start of a block: if so, starting
-            # changes from the previous block
-            cursor.movePosition(QTextCursor.StartOfBlock,
-                                QTextCursor.KeepAnchor)
-            if to_text_string(cursor.selectedText()):
-                cursor.movePosition(QTextCursor.NextBlock)
-                end_pos = cursor.position()
-        else:
-            cursor.movePosition(QTextCursor.StartOfBlock)
-            start_pos = cursor.position()
-            cursor.movePosition(QTextCursor.NextBlock)
-            end_pos = cursor.position()
-            # check if on last line
-            if end_pos == start_pos:
-                cursor.movePosition(QTextCursor.End)
-                end_pos = cursor.position()
-                if start_pos == end_pos:
-                    cursor.endEditBlock()
-                    return
-                add_linesep = True
+        last_line = False
+        
+        # ------ Select text
+        
+        # Get selection start location
         cursor.setPosition(start_pos)
-        cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-
-        sel_text = to_text_string(cursor.selectedText())
-        if add_linesep:
-            sel_text += os.linesep
-        cursor.removeSelectedText()
-
-        if after_current_line:
-            text = to_text_string(cursor.block().text())
-            if len(text) == 0:
-                #If the next line is blank
-                sel_text = sel_text[0:-1]
-                sel_text = os.linesep + sel_text
-            if not text:
-                cursor.insertText(sel_text)
-                cursor.endEditBlock()
-                return
-            start_pos += len(text)+1
-            end_pos += len(text)+1
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        start_pos = cursor.position()
+        
+        # Get selection end location
+        cursor.setPosition(end_pos)
+        if not cursor.atBlockStart() or end_pos == start_pos:
+            cursor.movePosition(QTextCursor.EndOfBlock)
             cursor.movePosition(QTextCursor.NextBlock)
-            if cursor.position() < start_pos:
-                cursor.movePosition(QTextCursor.End)
-                sel_text = os.linesep + sel_text
-                end_pos -= 1
+        end_pos = cursor.position()
+        
+        # Check if selection ends on the last line of the document
+        if cursor.atEnd():
+            if not cursor.atBlockStart() or end_pos == start_pos:
+                last_line = True
+                
+        # ------ Stop if at document boundary
+        
+        cursor.setPosition(start_pos)
+        if cursor.atStart() and not after_current_line:
+            # Stop if selection is already at top of the file while moving up
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self.__restore_selection(start_pos, end_pos)
+            return
+                
+        cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        if last_line and after_current_line:
+            # Stop if selection is already at end of the file while moving down
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self.__restore_selection(start_pos, end_pos)
+            return
+        
+        # ------ Move text
+        
+        sel_text = to_text_string(cursor.selectedText())
+        cursor.removeSelectedText()
+        
+        
+        if after_current_line:
+            # Shift selection down
+            text = to_text_string(cursor.block().text())  
+            sel_text = os.linesep + sel_text[0:-1]  # Move linesep at the start
+            cursor.movePosition(QTextCursor.EndOfBlock)
+            start_pos += len(text)+1
+            end_pos += len(text)
+            if not cursor.atEnd():
+                end_pos += 1        
         else:
-            cursor.movePosition(QTextCursor.PreviousBlock)
+            # Shift selection up
+            if last_line:
+                # Remove the last linesep and add it to the selected text
+                cursor.deletePreviousChar()
+                sel_text = sel_text + os.linesep
+                cursor.movePosition(QTextCursor.StartOfBlock)
+                end_pos += 1
+            else:
+                cursor.movePosition(QTextCursor.PreviousBlock)
             text = to_text_string(cursor.block().text())
             start_pos -= len(text)+1
             end_pos -= len(text)+1
@@ -1231,7 +1282,7 @@ class ConsoleBaseWidget(TextEditBaseWidget):
     """Console base widget"""
     BRACE_MATCHING_SCOPE = ('sol', 'eol')
     COLOR_PATTERN = re.compile('\x01?\x1b\[(.*?)m\x02?')
-    traceback_available = Signal()
+    exception_occurred = Signal(str, bool)
     userListActivated = Signal(int, str)
     completion_widget_activated = Signal(str)
     
@@ -1352,8 +1403,7 @@ class ConsoleBaseWidget(TextEditBaseWidget):
                 else:
                     # Show error/warning messages in red
                     cursor.insertText(text, self.error_style.format)
-            if is_traceback:
-                self.traceback_available.emit()
+            self.exception_occurred.emit(text, is_traceback)
         elif prompt:
             # Show prompt in green
             insert_text_to(cursor, text, self.prompt_style.format)

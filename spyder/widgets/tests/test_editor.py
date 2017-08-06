@@ -17,6 +17,7 @@ except ImportError:
 # Third party imports
 import pytest
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QTextCursor
 
 # Local imports
 from spyder.utils.fixtures import setup_editor
@@ -62,8 +63,147 @@ def editor_find_replace_bot(base_editor_bot):
     qtbot.addWidget(editor_stack)
     return editor_stack, finfo.editor, find_replace, qtbot
 
+@pytest.fixture
+def editor_cells_bot(base_editor_bot):
+    editor_stack, qtbot = base_editor_bot
+    text = ('# %%\n'
+            '# 1 cell\n'
+            '# print(1)\n'
+            '# %%\n'
+            '# 2 cell\n'
+            '# print(2)\n'
+            '# %%\n'
+            '# 3 cell\n'
+            '# print(3)\n')
+    finfo = editor_stack.new('cells.py', 'utf-8', text)
+    find_replace = FindReplace(None, enable_replace=True)
+    qtbot.addWidget(editor_stack)
+    return editor_stack, finfo.editor, qtbot
+
+
+@pytest.fixture
+def editor_folding_bot(base_editor_bot):
+    """
+    Setup CodeEditor with some text useful for folding related tests.
+    """
+    editor_stack, qtbot = base_editor_bot
+    text = ('# dummy test file\n'
+            'class a():\n'  # fold-block level-0
+            '    self.b = 1\n'
+            '    print(self.b)\n'
+            '    \n'
+            )
+    finfo = editor_stack.new('foo.py', 'utf-8', text)
+
+    find_replace = FindReplace(None, enable_replace=True)
+    editor_stack.set_find_widget(find_replace)
+    find_replace.set_editor(finfo.editor)
+    qtbot.addWidget(editor_stack)
+    return editor_stack, finfo.editor, find_replace, qtbot
+
 # Tests
 #-------------------------------
+def test_move_current_line_up(editor_bot):
+    editor_stack, editor, qtbot = editor_bot
+        
+    # Move second line up when nothing is selected.
+    editor.go_to_line(2)
+    editor.move_line_up()
+    expected_new_text = ('print(a)\n'
+                         'a = 1\n'
+                         '\n'
+                         'x = 2\n')
+    assert editor.toPlainText() == expected_new_text
+    
+    # Move line up when already at the top.
+    editor.move_line_up()
+    assert editor.toPlainText() == expected_new_text
+    
+    # Move fourth line up when part of the line is selected.
+    editor.go_to_line(4)    
+    editor.moveCursor(QTextCursor.Right, QTextCursor.MoveAnchor)
+    for i in range(2):
+        editor.moveCursor(QTextCursor.Right, QTextCursor.KeepAnchor)
+    editor.move_line_up()
+    expected_new_text = ('print(a)\n'
+                         'a = 1\n'                         
+                         'x = 2\n'
+                         '\n')
+    assert editor.toPlainText()[:] == expected_new_text
+    
+def test_move_current_line_down(editor_bot):
+    editor_stack, editor, qtbot = editor_bot
+        
+    # Move fourth line down when nothing is selected.
+    editor.go_to_line(4)
+    editor.move_line_down()
+    expected_new_text = ('a = 1\n'
+                         'print(a)\n'
+                         '\n'
+                         '\n'
+                         'x = 2')
+    assert editor.toPlainText() == expected_new_text
+    
+    # Move line down when already at the bottom.
+    editor.move_line_down()
+    assert editor.toPlainText() == expected_new_text
+        
+    # Move first line down when part of the line is selected.
+    editor.go_to_line(1)
+    editor.moveCursor(QTextCursor.Right, QTextCursor.MoveAnchor)
+    for i in range(2):
+        editor.moveCursor(QTextCursor.Right, QTextCursor.KeepAnchor)
+    editor.move_line_down()
+    expected_new_text = ('print(a)\n'
+                         'a = 1\n'
+                         '\n'
+                         '\n'
+                         'x = 2')
+    assert editor.toPlainText() == expected_new_text
+    
+def test_move_multiple_lines_up(editor_bot):
+    editor_stack, editor, qtbot = editor_bot
+    
+    # Move second and third lines up.
+    editor.go_to_line(2)
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
+    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+    editor.move_line_up()
+    
+    expected_new_text = ('print(a)\n'
+                         '\n'
+                         'a = 1\n'
+                         'x = 2\n')
+    assert editor.toPlainText() == expected_new_text     
+ 
+    # Move first and second lines up (to test already at top condition).
+    editor.move_line_up()
+    assert editor.toPlainText() == expected_new_text
+
+def test_move_multiple_lines_down(editor_bot):
+    editor_stack, editor, qtbot = editor_bot
+    
+    # Move third and fourth lines down.
+    editor.go_to_line(3)
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
+    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+    editor.move_line_down()
+    
+    expected_new_text = ('a = 1\n'
+                         'print(a)\n'
+                         '\n'
+                         '\n'
+                         'x = 2')
+    assert editor.toPlainText() == expected_new_text
+    
+    # Move fourht and fifth lines down (to test already at bottom condition).
+    editor.move_line_down()
+    assert editor.toPlainText() == expected_new_text
+    
 def test_run_top_line(editor_bot):
     editor_stack, editor, qtbot = editor_bot
     editor.go_to_line(1) # line number is one based
@@ -137,6 +277,92 @@ def test_replace_current_selected_line(editor_find_replace_bot):
     qtbot.keyClicks(finder.replace_text, 'ham')
     qtbot.keyPress(finder.replace_text, Qt.Key_Return)
     assert editor.toPlainText()[0:-1] == expected_new_text
+
+def test_replace_enter_press(editor_find_replace_bot):
+    """Test advance forward pressing Enter, and backwards with Shift+Enter."""
+    editor_stack, editor, finder, qtbot = editor_find_replace_bot
+    text = '  \nspam \nspam \nspam '
+    editor.set_text(text)
+    finder.show()
+
+    finder.search_text.add_text('spam')
+
+    # search forward
+    qtbot.keyPress(finder.search_text, Qt.Key_Return)
+    assert editor.get_cursor_line_column() == (1,4)
+
+    qtbot.keyPress(finder.search_text, Qt.Key_Return)
+    assert editor.get_cursor_line_column() == (2,4)
+
+    qtbot.keyPress(finder.search_text, Qt.Key_Return)
+    assert editor.get_cursor_line_column() == (3,4)
+
+    # search backwards
+    qtbot.keyPress(finder.search_text, Qt.Key_Return, modifier=Qt.ShiftModifier)
+    assert editor.get_cursor_line_column() == (2,4)
+
+    qtbot.keyPress(finder.search_text, Qt.Key_Return, modifier=Qt.ShiftModifier)
+    assert editor.get_cursor_line_column() == (1,4)
+
+    qtbot.keyPress(finder.search_text, Qt.Key_Return, modifier=Qt.ShiftModifier)
+    assert editor.get_cursor_line_column() == (3,4)
+
+
+def test_advance_cell(editor_cells_bot):
+    editor_stack, editor, qtbot = editor_cells_bot
+
+    # cursor at the end of the file
+    assert editor.get_cursor_line_column() == (10, 0)
+
+    # advance backwards to the begining of the 3rd cell
+    editor_stack.advance_cell(reverse=True)
+    assert editor.get_cursor_line_column() == (6, 0)
+
+    # advance backwards to 2nd cell
+    editor_stack.advance_cell(reverse=True)
+    assert editor.get_cursor_line_column() == (3, 0)
+    # advance backwards to 1st cell
+    editor_stack.advance_cell(reverse=True)
+    assert editor.get_cursor_line_column() == (0, 0)
+
+    # advance to 2nd cell
+    editor_stack.advance_cell()
+    assert editor.get_cursor_line_column() == (3, 0)
+    # advance to 3rd cell
+    editor_stack.advance_cell()
+    assert editor.get_cursor_line_column() == (6, 0)
+
+
+def test_unfold_when_searching(editor_folding_bot):
+    editor_stack, editor, finder, qtbot = editor_folding_bot
+    folding_panel = editor.panels.get('FoldingPanel')
+    line_search = editor.document().findBlockByLineNumber(3)
+
+    # fold region
+    block = editor.document().findBlockByLineNumber(1)
+    folding_panel.toggle_fold_trigger(block)
+    assert not line_search.isVisible()
+
+    # unfolded when searching
+    finder.show()
+    qtbot.keyClicks(finder.search_text, 'print')
+    qtbot.keyPress(finder.search_text, Qt.Key_Return)
+    assert line_search.isVisible()
+
+
+def test_unfold_goto(editor_folding_bot):
+    editor_stack, editor, finder, qtbot = editor_folding_bot
+    folding_panel = editor.panels.get('FoldingPanel')
+    line_goto = editor.document().findBlockByLineNumber(3)
+
+    # fold region
+    block = editor.document().findBlockByLineNumber(1)
+    folding_panel.toggle_fold_trigger(block)
+    assert not line_goto.isVisible()
+
+    # unfolded when goto
+    editor.go_to_line(4)
+    assert line_goto.isVisible()
 
 
 if __name__ == "__main__":

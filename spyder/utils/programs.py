@@ -9,6 +9,7 @@
 from __future__ import print_function
 
 from distutils.version import LooseVersion
+from getpass import getuser
 import imp
 import inspect
 import os
@@ -30,7 +31,7 @@ class ProgramError(Exception):
 if os.name == 'nt':
     TEMPDIR = tempfile.gettempdir() + osp.sep + 'spyder'
 else:
-    username = encoding.to_unicode_from_fs(os.environ.get('USER'))
+    username = encoding.to_unicode_from_fs(getuser())
     TEMPDIR = tempfile.gettempdir() + osp.sep + 'spyder-' + username
 
 
@@ -257,7 +258,6 @@ def run_python_script_in_terminal(fname, wdir, args, interact,
 
     :str wdir: working directory, may be empty.
     """
-    
     # If fname has spaces on it it can't be ran on Windows, so we have to
     # enclose it in quotes. Also wdir can come with / as os.sep, so we
     # need to take care of it
@@ -484,20 +484,3 @@ def is_python_interpreter(filename):
             return False
     except:
         return False
-
-
-def test_programs():
-    assert find_program('git')
-    assert shell_split('-q -o -a') == ['-q', '-o', '-a']
-    assert shell_split('-q "d:\\Python de xxxx\\t.txt" -o -a') == \
-           ['-q', 'd:\\Python de xxxx\\t.txt', '-o', '-a']
-    assert check_version('0.9.4-1', '0.9.4', '>=')
-    assert check_version('3.0.0rc1', '3.0.0', '<')
-    assert check_version('1.0', '1.0b2', '>')
-    assert is_module_installed('qtconsole', '>=4.0')
-    assert not is_module_installed('IPython', '>=1.0;<3.0')
-    assert is_module_installed('jedi', '>=0.7.0')
-
-
-if __name__ == '__main__':
-    test_programs()
